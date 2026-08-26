@@ -1,0 +1,74 @@
+---
+- name: CIS 5.2.2 - Ensure sudo commands use pty
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Remove active !use_pty configuration from sudoers files
+      ansible.builtin.replace:
+        path: "{{ item }}"
+        regexp: '^(\s*Defaults\s+[^#\n\r]*),?\s*!use_pty\b[^#\n\r]*(?:\n|$)'
+        replace: ''
+        backup: true
+      loop: >-
+        {{
+          ['/etc/sudoers'] +
+          lookup(
+            'ansible.builtin.fileglob',
+            '/etc/sudoers.d/*',
+            wantlist=True
+          )
+        }}
+      when:
+        - item is file
+        - not item.endswith('~')
+        - '.' not in (item | basename)
+      failed_when: false
+
+    - name: Configure sudo to always use a pseudo-terminal
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/99-cis-use-pty
+        owner: root
+        group: root
+        mode: '0440'
+        content: |
+          # CIS 5.2.2
+          # Ensure sudo commands use pty
+          Defaults use_pty
+      validate: '/usr/sbin/visudo -cf %s'
+
+    - name: Verify sudo use_pty configuration
+      ansible.builtin.shell: |
+        grep -rPi '^\h*Defaults\h+([^#\n\r]+,\h*)?use_pty\b' \
+          /etc/sudoers /etc/sudoers.d/* 2>/dev/null
+      register: use_pty_check
+      changed_when: false
+      failed_when: false
+
+    - name: Verify no !use_pty configuration exists
+      ansible.builtin.shell: |
+        if grep -rPi '^\h*Defaults\h+([^#\n\r]+,\h*)?\!use_pty\b' \
+          /etc/sudoers /etc/sudoers.d/* 2>/dev/null; then
+          exit 1
+        fi
+        exit 0
+      register: no_disable_pty_check
+      changed_when: false
+      failed_when: false
+
+    - name: Validate complete sudoers configuration
+      ansible.builtin.command:
+        cmd: /usr/sbin/visudo -c
+      register: sudoers_validation
+      changed_when: false
+
+    - name: Assert CIS 5.2.2 compliance
+      ansible.builtin.assert:
+        that:
+          - use_pty_check.rc == 0
+          - no_disable_pty_check.rc == 0
+          - sudoers_validation.rc == 0
+        success_msg: "CIS 5.2.2 compliant - sudo commands use pty"
+        fail_msg: "CIS 5.2.2 failed - sudo use_pty configuration is not compliant"
