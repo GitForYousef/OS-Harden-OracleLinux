@@ -1,0 +1,73 @@
+---
+- name: CIS 2.4.1.8 - Ensure crontab is restricted to authorized users
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Check if cron is installed
+      ansible.builtin.command:
+        cmd: rpm -q cronie
+      register: cronie_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create /etc/cron.allow
+      ansible.builtin.file:
+        path: /etc/cron.allow
+        state: touch
+        owner: root
+        group: root
+        mode: '0640'
+        modification_time: preserve
+        access_time: preserve
+      when: cronie_check.rc == 0
+
+    - name: Set /etc/cron.deny ownership and permissions
+      ansible.builtin.file:
+        path: /etc/cron.deny
+        owner: root
+        group: root
+        mode: '0640'
+      when:
+        - cronie_check.rc == 0
+        - ansible.builtin.file is defined
+
+    - name: Check if /etc/cron.deny exists
+      ansible.builtin.stat:
+        path: /etc/cron.deny
+      register: cron_deny
+
+    - name: Set /etc/cron.deny ownership and permissions
+      ansible.builtin.file:
+        path: /etc/cron.deny
+        owner: root
+        group: root
+        mode: '0640'
+      when:
+        - cronie_check.rc == 0
+        - cron_deny.stat.exists
+
+    - name: Verify /etc/cron.allow
+      ansible.builtin.stat:
+        path: /etc/cron.allow
+      register: cron_allow_verify
+
+    - name: Verify /etc/cron.deny
+      ansible.builtin.stat:
+        path: /etc/cron.deny
+      register: cron_deny_verify
+
+    - name: Assert CIS 2.4.1.8 compliance
+      ansible.builtin.assert:
+        that:
+          - cron_allow_verify.stat.exists
+          - cron_allow_verify.stat.pw_name == 'root'
+          - cron_allow_verify.stat.gr_name == 'root'
+          - (cron_allow_verify.stat.mode | int(base=8)) <= 640
+          - not cron_deny_verify.stat.exists or cron_deny_verify.stat.pw_name == 'root'
+          - not cron_deny_verify.stat.exists or cron_deny_verify.stat.gr_name == 'root'
+          - not cron_deny_verify.stat.exists or (cron_deny_verify.stat.mode | int(base=8)) <= 640
+        fail_msg: "CIS 2.4.1.8 FAILED - cron.allow/cron.deny permissions are not compliant."
+        success_msg: "CIS 2.4.1.8 COMPLIANT - crontab is restricted to authorized users."
