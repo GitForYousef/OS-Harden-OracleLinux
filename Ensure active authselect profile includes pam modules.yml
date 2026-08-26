@@ -9,41 +9,57 @@
     - name: Get active authselect profile
       ansible.builtin.command:
         cmd: authselect current -r
-      register: authselect_profile
+      register: authselect_profile_raw
       changed_when: false
+
+    - name: Extract authselect profile name
+      ansible.builtin.set_fact:
+        authselect_profile: "{{ authselect_profile_raw.stdout | trim | regex_search('^custom/[^[:space:]]+') }}"
+
+    - name: Display active authselect profile
+      ansible.builtin.debug:
+        msg:
+          - "Full authselect output: {{ authselect_profile_raw.stdout | trim }}"
+          - "Profile: {{ authselect_profile }}"
 
     - name: Verify custom authselect profile is active
       ansible.builtin.assert:
         that:
-          - authselect_profile.stdout is search('^custom/')
+          - authselect_profile is not none
+          - authselect_profile != ''
         fail_msg: >-
-          Active authselect profile is not a custom profile.
-          Current profile: {{ authselect_profile.stdout }}
+          Could not determine the active custom authselect profile.
+          Full output: {{ authselect_profile_raw.stdout | trim }}
         success_msg: >-
-          Active custom authselect profile detected:
-          {{ authselect_profile.stdout }}
+          Active custom authselect profile:
+          {{ authselect_profile }}
 
     - name: Set authselect profile path
       ansible.builtin.set_fact:
-        authselect_profile_path: "/etc/authselect/{{ authselect_profile.stdout | trim }}"
+        authselect_profile_path: "/etc/authselect/{{ authselect_profile }}"
 
-    - name: Verify authselect profile templates exist
+    - name: Verify authselect system-auth template exists
       ansible.builtin.stat:
-        path: "{{ authselect_profile_path }}/{{ item }}"
-      loop:
-        - system-auth
-        - password-auth
-      register: authselect_template_files
+        path: "{{ authselect_profile_path }}/system-auth"
+      register: system_auth_template
 
-    - name: Assert authselect template files exist
+    - name: Verify authselect password-auth template exists
+      ansible.builtin.stat:
+        path: "{{ authselect_profile_path }}/password-auth"
+      register: password_auth_template
+
+    - name: Assert authselect templates exist
       ansible.builtin.assert:
         that:
-          - item.stat.exists
-          - item.stat.isreg
-        fail_msg: "Missing authselect template: {{ item.item }}"
-      loop: "{{ authselect_template_files.results }}"
+          - system_auth_template.stat.exists
+          - password_auth_template.stat.exists
+        fail_msg: >-
+          Required authselect template files are missing from
+          {{ authselect_profile_path }}
+        success_msg: >-
+          Authselect system-auth and password-auth templates exist.
 
-    - name: Backup authselect system-auth template
+    - name: Backup system-auth template
       ansible.builtin.copy:
         src: "{{ authselect_profile_path }}/system-auth"
         dest: "{{ authselect_profile_path }}/system-auth.cis-backup"
@@ -53,7 +69,7 @@
         mode: '0644'
         force: false
 
-    - name: Backup authselect password-auth template
+    - name: Backup password-auth template
       ansible.builtin.copy:
         src: "{{ authselect_profile_path }}/password-auth"
         dest: "{{ authselect_profile_path }}/password-auth.cis-backup"
@@ -66,37 +82,37 @@
     - name: Add pam_faillock authfail to system-auth template
       ansible.builtin.lineinfile:
         path: "{{ authselect_profile_path }}/system-auth"
-        regexp: '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+authfail\b'
+        regexp: '^[[:space:]]*auth[[:space:]]+(required|requisite)[[:space:]]+pam_faillock\.so[[:space:]]+authfail\b'
         line: 'auth        required      pam_faillock.so authfail'
-        insertafter: '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+preauth\b'
+        insertafter: '^[[:space:]]*auth[[:space:]]+(required|requisite)[[:space:]]+pam_faillock\.so[[:space:]]+preauth\b'
         state: present
       register: system_auth_changed
 
     - name: Add pam_faillock authfail to password-auth template
       ansible.builtin.lineinfile:
         path: "{{ authselect_profile_path }}/password-auth"
-        regexp: '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+authfail\b'
+        regexp: '^[[:space:]]*auth[[:space:]]+(required|requisite)[[:space:]]+pam_faillock\.so[[:space:]]+authfail\b'
         line: 'auth        required      pam_faillock.so authfail'
-        insertafter: '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+preauth\b'
+        insertafter: '^[[:space:]]*auth[[:space:]]+(required|requisite)[[:space:]]+pam_faillock\.so[[:space:]]+preauth\b'
         state: present
       register: password_auth_changed
 
-    - name: Verify pam_faillock entries in authselect templates
+    - name: Display authselect template pam_faillock configuration
       ansible.builtin.shell: |
-        echo "===== system-auth ====="
+        echo "===== SYSTEM-AUTH TEMPLATE ====="
         grep -nE 'pam_faillock\.so' "{{ authselect_profile_path }}/system-auth" || true
 
         echo
-        echo "===== password-auth ====="
+        echo "===== PASSWORD-AUTH TEMPLATE ====="
         grep -nE 'pam_faillock\.so' "{{ authselect_profile_path }}/password-auth" || true
       args:
         executable: /bin/bash
-      register: faillock_template_check
+      register: template_check
       changed_when: false
 
-    - name: Display authselect template configuration
+    - name: Show template configuration
       ansible.builtin.debug:
-        msg: "{{ faillock_template_check.stdout_lines }}"
+        msg: "{{ template_check.stdout_lines }}"
 
     - name: Apply authselect changes
       ansible.builtin.command:
@@ -105,18 +121,18 @@
       when:
         - system_auth_changed.changed or password_auth_changed.changed
 
-    - name: Verify generated system-auth
+    - name: Verify system-auth generated PAM configuration
       ansible.builtin.shell: |
-        grep -nE '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+authfail\b' /etc/pam.d/system-auth
+        grep -nE '^[[:space:]]*auth[[:space:]]+(required|requisite)[[:space:]]+pam_faillock\.so[[:space:]]+authfail\b' /etc/pam.d/system-auth
       args:
         executable: /bin/bash
       register: system_auth_verify
       changed_when: false
       failed_when: false
 
-    - name: Verify generated password-auth
+    - name: Verify password-auth generated PAM configuration
       ansible.builtin.shell: |
-        grep -nE '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+authfail\b' /etc/pam.d/password-auth
+        grep -nE '^[[:space:]]*auth[[:space:]]+(required|requisite)[[:space:]]+pam_faillock\.so[[:space:]]+authfail\b' /etc/pam.d/password-auth
       args:
         executable: /bin/bash
       register: password_auth_verify
@@ -136,7 +152,7 @@
           - password_auth_verify.rc == 0
         success_msg: >-
           CIS 5.3.2.1 compliant -
-          pam_faillock authfail is present in both system-auth and password-auth
+          pam_faillock authfail is present in both system-auth and password-auth.
         fail_msg: >-
           CIS 5.3.2.1 FAILED -
-          pam_faillock authfail is missing from one or both PAM files
+          pam_faillock authfail is missing from one or both PAM files.
