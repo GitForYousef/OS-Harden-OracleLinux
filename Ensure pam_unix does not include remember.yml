@@ -1,0 +1,84 @@
+---
+- name: CIS 5.3.3.4.2 - Ensure pam_unix does not include remember
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Get active authselect profile
+      ansible.builtin.shell: |
+        authselect current -r | awk '{print $1}'
+      register: authselect_profile
+      changed_when: false
+
+    - name: Determine authselect profile path
+      ansible.builtin.set_fact:
+        authselect_profile_path: >-
+          {{
+            '/etc/authselect/' + authselect_profile.stdout
+            if authselect_profile.stdout is match('^custom/')
+            else '/usr/share/authselect/default/' + authselect_profile.stdout
+          }}
+
+    - name: Display active authselect profile
+      ansible.builtin.debug:
+        msg: "Active authselect profile: {{ authselect_profile_path }}"
+
+    - name: Remove remember argument from pam_unix in system-auth
+      ansible.builtin.replace:
+        path: "{{ authselect_profile_path }}/system-auth"
+        regexp: '(\bpam_unix\.so\b[^\n#]*?)\s+remember\s*=\s*[1-9][0-9]*'
+        replace: '\1'
+      register: system_auth_changed
+
+    - name: Remove remember argument from pam_unix in password-auth
+      ansible.builtin.replace:
+        path: "{{ authselect_profile_path }}/password-auth"
+        regexp: '(\bpam_unix\.so\b[^\n#]*?)\s+remember\s*=\s*[1-9][0-9]*'
+        replace: '\1'
+      register: password_auth_changed
+
+    - name: Apply authselect changes
+      ansible.builtin.command:
+        cmd: authselect apply-changes
+      when:
+        - system_auth_changed.changed or password_auth_changed.changed
+      register: authselect_apply
+      changed_when: true
+
+    - name: Verify system-auth has no pam_unix remember argument
+      ansible.builtin.shell: |
+        if grep -Pi '^\s*password\s+([^#\r\n]+\s+)?pam_unix\.so\s+([^#\r\n]+\s+)?remember\s*=' \
+          /etc/pam.d/system-auth 2>/dev/null; then
+          echo "FAIL: pam_unix remember argument exists in system-auth"
+          exit 1
+        else
+          echo "PASS: system-auth pam_unix has no remember argument"
+          exit 0
+        fi
+      register: verify_system_auth
+      changed_when: false
+      failed_when: false
+
+    - name: Verify password-auth has no pam_unix remember argument
+      ansible.builtin.shell: |
+        if grep -Pi '^\s*password\s+([^#\r\n]+\s+)?pam_unix\.so\s+([^#\r\n]+\s+)?remember\s*=' \
+          /etc/pam.d/password-auth 2>/dev/null; then
+          echo "FAIL: pam_unix remember argument exists in password-auth"
+          exit 1
+        else
+          echo "PASS: password-auth pam_unix has no remember argument"
+          exit 0
+        fi
+      register: verify_password_auth
+      changed_when: false
+      failed_when: false
+
+    - name: Assert CIS 5.3.3.4.2 compliance
+      ansible.builtin.assert:
+        that:
+          - verify_system_auth.rc == 0
+          - verify_password_auth.rc == 0
+        success_msg: "CIS 5.3.3.4.2 compliant - pam_unix does not include remember"
+        fail_msg: "CIS 5.3.3.4.2 failed - pam_unix still contains remember"
