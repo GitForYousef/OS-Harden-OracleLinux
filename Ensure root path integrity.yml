@@ -6,28 +6,33 @@
 
   tasks:
 
-    - name: Remove unsafe HOME local bin block from root bashrc
+    - name: Remove Oracle Linux user local bin PATH block from root bashrc
+      ansible.builtin.blockinfile:
+        path: /root/.bashrc
+        marker: "# {mark} ANSIBLE CIS ROOT PATH HARDENING"
+        state: absent
+
+    - name: Remove direct HOME local bin PATH assignment from root bashrc
       ansible.builtin.replace:
         path: /root/.bashrc
-        regexp: '(?ms)^# User specific environment\nif ! \[\[ "\$PATH" =~ "\$HOME/\.local/bin::" \]\]\nthen\n\s*PATH="\$HOME/\.local/bin:\$PATH"\nfi\nexport PATH\n'
-        replace: '# User specific environment\n'
-        backup: true
+        regexp: '^[[:space:]]*(export[[:space:]]+)?PATH=["'']?\$HOME/\.local/bin:\$PATH["'']?[[:space:]]*$'
+        replace: ''
+      failed_when: false
 
-    - name: Remove direct unsafe HOME local bin PATH entries from root startup files
+    - name: Remove unsafe HOME local bin PATH assignment from root profile files
       ansible.builtin.replace:
         path: "{{ item }}"
-        regexp: '(^|:)("\$HOME/\.local/bin"|''\$HOME/\.local/bin''|\$HOME/\.local/bin)'
+        regexp: '^[[:space:]]*(export[[:space:]]+)?PATH=["'']?\$HOME/\.local/bin:\$PATH["'']?[[:space:]]*$'
         replace: ''
       loop:
-        - /root/.bashrc
         - /root/.bash_profile
         - /root/.profile
       failed_when: false
 
-    - name: Remove empty PATH entries from root startup files
+    - name: Remove root home local bin from existing PATH assignments
       ansible.builtin.replace:
         path: "{{ item }}"
-        regexp: '(^|:):+'
+        regexp: '(^|:)\$HOME/\.local/bin(:|$)'
         replace: '\1'
       loop:
         - /root/.bashrc
@@ -35,98 +40,97 @@
         - /root/.profile
       failed_when: false
 
-    - name: Remove trailing colon from PATH assignments
+    - name: Remove duplicate colons from root PATH assignments
       ansible.builtin.replace:
         path: "{{ item }}"
-        regexp: '(^[[:space:]]*(?:export[[:space:]]+)?PATH=.*):[[:space:]]*$'
+        regexp: '(^[[:space:]]*(?:export[[:space:]]+)?PATH=[^#]*):+'
         replace: '\1'
       loop:
         - /root/.bashrc
         - /root/.bash_profile
         - /root/.profile
       failed_when: false
+
+    - name: Remove trailing colon from root PATH assignments
+      ansible.builtin.replace:
+        path: "{{ item }}"
+        regexp: '(^[[:space:]]*(?:export[[:space:]]+)?PATH=[^#]*):[[:space:]]*$'
+        replace: '\1'
+      loop:
+        - /root/.bashrc
+        - /root/.bash_profile
+        - /root/.profile
+      failed_when: false
+
+    - name: Build clean root PATH from a login shell
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        PATH_VALUE=$(bash -lc 'printf "%s" "$PATH"')
+
+        printf '%s\n' "$PATH_VALUE"
+      args:
+        executable: /bin/bash
+      register: root_path
+      changed_when: false
 
     - name: Verify root PATH integrity
       ansible.builtin.shell: |
+        set -u
+
+        path_value="{{ root_path.stdout | trim }}"
         bad=0
 
-        for file in \
-          /root/.bashrc \
-          /root/.bash_profile \
-          /root/.profile \
-          /etc/profile \
-          /etc/bashrc \
-          /etc/profile.d/*.sh; do
+        OLDIFS="$IFS"
+        IFS=':'
 
-          [ -f "$file" ] || continue
+        for dir in $path_value; do
 
-          while IFS= read -r line; do
+          if [ -z "$dir" ]; then
+            echo "FAIL: empty PATH entry"
+            bad=1
+            continue
+          fi
 
-            path_value="${line#*=}"
+          if [ "$dir" = "." ]; then
+            echo "FAIL: current directory '.' in root PATH"
+            bad=1
+            continue
+          fi
 
-            path_value="${path_value#\"}"
-            path_value="${path_value%\"}"
-            path_value="${path_value#\'}"
-            path_value="${path_value%\'}"
+          case "$dir" in
 
-            OLDIFS="$IFS"
-            IFS=':'
+            /*)
+              if [ ! -d "$dir" ]; then
+                echo "FAIL: $dir is not a directory"
+                bad=1
+                continue
+              fi
 
-            for dir in $path_value; do
+              owner=$(stat -c '%U' "$dir")
+              mode=$(stat -c '%a' "$dir")
 
-              case "$dir" in
-                "")
-                  echo "FAIL: empty PATH entry in $file"
-                  bad=1
-                  ;;
+              if [ "$owner" != "root" ]; then
+                echo "FAIL: $dir is not owned by root"
+                bad=1
+              fi
 
-                ".")
-                  echo "FAIL: current directory in PATH in $file"
-                  bad=1
-                  ;;
+              if [ $((8#$mode & 0022)) -ne 0 ]; then
+                echo "FAIL: $dir is writable by group/others"
+                bad=1
+              fi
+              ;;
 
-                "\$HOME"|"\$HOME/"*|"/root/"*)
-                  echo "FAIL: unsafe PATH entry '$dir' in $file"
-                  bad=1
-                  ;;
+            *)
+              echo "FAIL: relative PATH entry '$dir'"
+              bad=1
+              ;;
 
-                /*)
-                  if [ ! -d "$dir" ]; then
-                    echo "FAIL: $dir is not a directory"
-                    bad=1
-                    continue
-                  fi
-
-                  owner=$(stat -c '%U' "$dir")
-                  mode=$(stat -c '%a' "$dir")
-
-                  if [ "$owner" != "root" ]; then
-                    echo "FAIL: $dir is not root owned"
-                    bad=1
-                  fi
-
-                  if [ $((8#$mode & 0022)) -ne 0 ]; then
-                    echo "FAIL: $dir is writable by group/others"
-                    bad=1
-                  fi
-                  ;;
-
-                *)
-                  echo "FAIL: relative PATH entry '$dir' in $file"
-                  bad=1
-                  ;;
-              esac
-
-            done
-
-            IFS="$OLDIFS"
-
-          done < <(
-            grep -E '^[[:space:]]*(export[[:space:]]+)?PATH=' \
-              "$file" 2>/dev/null || true
-          )
+          esac
 
         done
+
+        IFS="$OLDIFS"
 
         if [ "$bad" -eq 0 ]; then
           echo "PASS: root PATH integrity verified"
@@ -134,16 +138,24 @@
         fi
 
         exit 1
+      args:
+        executable: /bin/bash
       register: path_check
       changed_when: false
 
-    - name: Display PATH verification result
+    - name: Display root PATH
       ansible.builtin.debug:
-        msg: "{{ path_check.stdout_lines }}"
+        msg:
+          - "Effective root PATH:"
+          - "{{ root_path.stdout }}"
+
+    - name: Display PATH verification
+      ansible.builtin.debug:
+        var: path_check.stdout_lines
 
     - name: Assert CIS 5.4.2.5 compliance
       ansible.builtin.assert:
         that:
           - path_check.rc == 0
         success_msg: "CIS 5.4.2.5 compliant - root PATH integrity verified"
-        fail_msg: "CIS 5.4.2.5 failed - unsafe root PATH entries remain"
+        fail_msg: "CIS 5.4.2.5 failed - unsafe root PATH entry detected"
