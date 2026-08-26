@@ -6,55 +6,64 @@
 
   tasks:
 
-    - name: Remove $HOME/.local/bin from root PATH
+    - name: Remove unsafe HOME local bin block from root bashrc
       ansible.builtin.replace:
         path: /root/.bashrc
-        regexp: '(^|:)\$HOME/\.local/bin(:|$)'
+        regexp: '(?ms)^# User specific environment\nif ! \[\[ "\$PATH" =~ "\$HOME/\.local/bin::" \]\]\nthen\n\s*PATH="\$HOME/\.local/bin:\$PATH"\nfi\nexport PATH\n'
+        replace: '# User specific environment\n'
+        backup: true
+
+    - name: Remove direct unsafe HOME local bin PATH entries from root startup files
+      ansible.builtin.replace:
+        path: "{{ item }}"
+        regexp: '(^|:)("\$HOME/\.local/bin"|''\$HOME/\.local/bin''|\$HOME/\.local/bin)'
+        replace: ''
+      loop:
+        - /root/.bashrc
+        - /root/.bash_profile
+        - /root/.profile
+      failed_when: false
+
+    - name: Remove empty PATH entries from root startup files
+      ansible.builtin.replace:
+        path: "{{ item }}"
+        regexp: '(^|:):+'
         replace: '\1'
-        backup: true
+      loop:
+        - /root/.bashrc
+        - /root/.bash_profile
+        - /root/.profile
+      failed_when: false
 
-    - name: Remove $HOME/bin from root PATH
+    - name: Remove trailing colon from PATH assignments
       ansible.builtin.replace:
-        path: /root/.bashrc
-        regexp: '(^|:)\$HOME/bin(:|$)'
+        path: "{{ item }}"
+        regexp: '(^[[:space:]]*(?:export[[:space:]]+)?PATH=.*):[[:space:]]*$'
         replace: '\1'
-        backup: true
-
-    - name: Remove /root/.local/bin from root PATH
-      ansible.builtin.replace:
-        path: /root/.bashrc
-        regexp: '(^|:)/root/\.local/bin(:|$)'
-        replace: '\1'
-        backup: true
-
-    - name: Remove /root/bin from root PATH
-      ansible.builtin.replace:
-        path: /root/.bashrc
-        regexp: '(^|:)/root/bin(:|$)'
-        replace: '\1'
-        backup: true
-
-    - name: Clean duplicate colons in root PATH
-      ansible.builtin.replace:
-        path: /root/.bashrc
-        regexp: 'PATH=([^#\n]*):{2,}([^#\n]*)'
-        replace: 'PATH=\1:\2'
-        backup: true
-
-    - name: Remove trailing colon from root PATH
-      ansible.builtin.replace:
-        path: /root/.bashrc
-        regexp: 'PATH=([^#\n]*):[[:space:]]*$'
-        replace: 'PATH=\1'
-        backup: true
+      loop:
+        - /root/.bashrc
+        - /root/.bash_profile
+        - /root/.profile
+      failed_when: false
 
     - name: Verify root PATH integrity
-      ansible.builtin.shell:
-        cmd: |
-          bad=0
+      ansible.builtin.shell: |
+        bad=0
+
+        for file in \
+          /root/.bashrc \
+          /root/.bash_profile \
+          /root/.profile \
+          /etc/profile \
+          /etc/bashrc \
+          /etc/profile.d/*.sh; do
+
+          [ -f "$file" ] || continue
 
           while IFS= read -r line; do
+
             path_value="${line#*=}"
+
             path_value="${path_value#\"}"
             path_value="${path_value%\"}"
             path_value="${path_value#\'}"
@@ -66,13 +75,21 @@
             for dir in $path_value; do
 
               case "$dir" in
-                ""|"."|"\$HOME"|"\$HOME/"*|"/root/"*)
-                  echo "FAIL: unsafe PATH entry '$dir'"
+                "")
+                  echo "FAIL: empty PATH entry in $file"
                   bad=1
                   ;;
-              esac
 
-              case "$dir" in
+                ".")
+                  echo "FAIL: current directory in PATH in $file"
+                  bad=1
+                  ;;
+
+                "\$HOME"|"\$HOME/"*|"/root/"*)
+                  echo "FAIL: unsafe PATH entry '$dir' in $file"
+                  bad=1
+                  ;;
+
                 /*)
                   if [ ! -d "$dir" ]; then
                     echo "FAIL: $dir is not a directory"
@@ -93,6 +110,11 @@
                     bad=1
                   fi
                   ;;
+
+                *)
+                  echo "FAIL: relative PATH entry '$dir' in $file"
+                  bad=1
+                  ;;
               esac
 
             done
@@ -101,24 +123,27 @@
 
           done < <(
             grep -E '^[[:space:]]*(export[[:space:]]+)?PATH=' \
-              /root/.bashrc /root/.bash_profile /root/.profile \
-              /etc/profile /etc/bashrc /etc/profile.d/*.sh \
-              2>/dev/null || true
+              "$file" 2>/dev/null || true
           )
 
-          if [ "$bad" -eq 0 ]; then
-            echo "PASS: root PATH integrity verified"
-            exit 0
-          fi
+        done
 
-          exit 1
-      register: root_path_check
+        if [ "$bad" -eq 0 ]; then
+          echo "PASS: root PATH integrity verified"
+          exit 0
+        fi
+
+        exit 1
+      register: path_check
       changed_when: false
-      failed_when: root_path_check.rc != 0
+
+    - name: Display PATH verification result
+      ansible.builtin.debug:
+        msg: "{{ path_check.stdout_lines }}"
 
     - name: Assert CIS 5.4.2.5 compliance
       ansible.builtin.assert:
         that:
-          - root_path_check.rc == 0
+          - path_check.rc == 0
         success_msg: "CIS 5.4.2.5 compliant - root PATH integrity verified"
-        fail_msg: "CIS 5.4.2.5 failed - root PATH still contains an invalid entry"
+        fail_msg: "CIS 5.4.2.5 failed - unsafe root PATH entries remain"
