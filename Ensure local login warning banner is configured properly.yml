@@ -1,0 +1,60 @@
+---
+- name: CIS 1.7.2 - Ensure local login warning banner is configured properly
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Configure local login warning banner
+      ansible.builtin.copy:
+        dest: /etc/issue
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          Authorized users only. All activity may be monitored and reported.
+          Unauthorized access is prohibited.
+      register: issue_banner
+
+    - name: Verify local login banner
+      ansible.builtin.shell: |
+        cat /etc/issue
+      register: issue_check
+      changed_when: false
+
+    - name: Verify OS information escape sequences are absent
+      ansible.builtin.shell: |
+        if grep -Eq '\\[mrsv]' /etc/issue; then
+          echo "FAIL: OS information escape sequence found in /etc/issue"
+          exit 1
+        else
+          echo "PASS: No OS information escape sequences found"
+        fi
+      register: issue_escape_check
+      changed_when: false
+
+    - name: Verify required warning banner content
+      ansible.builtin.shell: |
+        grep -Fq "Authorized users only. All activity may be monitored and reported." /etc/issue
+      register: issue_content_check
+      changed_when: false
+
+    - name: Display banner verification
+      ansible.builtin.debug:
+        msg:
+          - "===== /etc/issue ====="
+          - "{{ issue_check.stdout }}"
+          - "===== Escape Sequence Check ====="
+          - "{{ issue_escape_check.stdout }}"
+
+    - name: Assert CIS 1.7.2 compliance
+      ansible.builtin.assert:
+        that:
+          - issue_escape_check.rc == 0
+          - issue_content_check.rc == 0
+        fail_msg: >-
+          CIS 1.7.2 FAILED - /etc/issue does not contain the required
+          warning banner or contains prohibited OS information escape sequences.
+        success_msg: >-
+          CIS 1.7.2 COMPLIANT - local login warning banner is correctly configured.
