@@ -7,8 +7,8 @@
   tasks:
 
     - name: Get active authselect profile
-      ansible.builtin.command:
-        cmd: authselect current -r
+      ansible.builtin.shell: |
+        authselect current -r | awk '{print $1}'
       register: authselect_profile
       changed_when: false
 
@@ -21,7 +21,11 @@
             else '/usr/share/authselect/default/' + authselect_profile.stdout
           }}
 
-    - name: Check system-auth template
+    - name: Display authselect profile path
+      ansible.builtin.debug:
+        msg: "Active authselect profile: {{ authselect_profile_path }}"
+
+    - name: Check system-auth template for pam_faillock authfail
       ansible.builtin.shell: |
         grep -Pq '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*authfail\b' \
         "{{ authselect_profile_path }}/system-auth"
@@ -29,7 +33,7 @@
       changed_when: false
       failed_when: false
 
-    - name: Check password-auth template
+    - name: Check password-auth template for pam_faillock authfail
       ansible.builtin.shell: |
         grep -Pq '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*authfail\b' \
         "{{ authselect_profile_path }}/password-auth"
