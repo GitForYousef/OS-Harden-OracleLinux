@@ -6,17 +6,10 @@
 
   tasks:
 
-    - name: Read root user's PATH
-      ansible.builtin.shell:
-        cmd: |
-          awk -F= '$1 == "PATH" {print substr($0,6)}' /root/.bash_profile /root/.bashrc /root/.profile 2>/dev/null
-      register: root_path_files
-      changed_when: false
-
-    - name: Remove invalid root PATH entries from root shell files
+    - name: Remove /root/.local/bin from root PATH
       ansible.builtin.replace:
         path: "{{ item }}"
-        regexp: '(^|:)(/root/\.local/bin|/root/bin)(?=:|$)'
+        regexp: '(^|:)/root/\.local/bin(?=:|$)'
         replace: '\1'
         backup: true
       loop:
@@ -25,10 +18,22 @@
         - /root/.profile
       when: item is file
 
-    - name: Remove duplicate colons from root shell files
+    - name: Remove /root/bin from root PATH
       ansible.builtin.replace:
         path: "{{ item }}"
-        regexp: 'PATH=([^"\n]*):+([^"\n]*)'
+        regexp: '(^|:)/root/bin(?=:|$)'
+        replace: '\1'
+        backup: true
+      loop:
+        - /root/.bash_profile
+        - /root/.bashrc
+        - /root/.profile
+      when: item is file
+
+    - name: Clean duplicate colons in root PATH definitions
+      ansible.builtin.replace:
+        path: "{{ item }}"
+        regexp: 'PATH=([^#\n]*):{2,}([^#\n]*)'
         replace: 'PATH=\1:\2'
       loop:
         - /root/.bash_profile
@@ -36,41 +41,67 @@
         - /root/.profile
       when: item is file
 
-    - name: Verify root PATH entries
+    - name: Verify root PATH definitions
       ansible.builtin.shell:
         cmd: |
-          root_path=$(
-            for f in /root/.bash_profile /root/.bashrc /root/.profile; do
-              if [ -f "$f" ]; then
-                grep -hE '^[[:space:]]*(export[[:space:]]+)?PATH=' "$f"
-              fi
-            done
-          )
+          found=0
 
-          echo "$root_path" | grep -oE '/[^:$[:space:]]+' | while read -r dir; do
-            [ -d "$dir" ] || {
-              echo "FAIL: $dir is not a directory"
-              exit 1
-            }
+          for file in /root/.bash_profile /root/.bashrc /root/.profile; do
+            [ -f "$file" ] || continue
 
-            owner=$(stat -c '%U' "$dir")
-            mode=$(stat -c '%a' "$dir")
+            while IFS= read -r line; do
+              path_value="${line#*=}"
+              path_value="${path_value#\"}"
+              path_value="${path_value%\"}"
+              path_value="${path_value#\'}"
+              path_value="${path_value%\'}"
 
-            [ "$owner" = "root" ] || {
-              echo "FAIL: $dir is not root owned"
-              exit 1
-            }
+              OLDIFS="$IFS"
+              IFS=':'
 
-            [ $((8#$mode & 0022)) -eq 0 ] || {
-              echo "FAIL: $dir is writable by group/others"
-              exit 1
-            }
+              for dir in $path_value; do
+                [ -n "$dir" ] || {
+                  echo "FAIL: empty PATH entry in $file"
+                  exit 1
+                }
+
+                [ "$dir" != "." ] || {
+                  echo "FAIL: current directory in PATH: $file"
+                  exit 1
+                }
+
+                case "$dir" in
+                  /*)
+                    ;;
+                  *)
+                    echo "FAIL: relative PATH entry: $dir"
+                    exit 1
+                    ;;
+                esac
+
+                [ -d "$dir" ] || {
+                  echo "FAIL: $dir is not a directory"
+                  exit 1
+                }
+
+                owner=$(stat -c '%U' "$dir")
+                mode=$(stat -c '%a' "$dir")
+
+                [ "$owner" = "root" ] || {
+                  echo "FAIL: $dir is not owned by root"
+                  exit 1
+                }
+
+                if [ $((8#$mode & 0022)) -ne 0 ]; then
+                  echo "FAIL: $dir is writable by group/others"
+                  exit 1
+                fi
+              done
+
+              IFS="$OLDIFS"
+
+            done < <(grep -E '^[[:space:]]*(export[[:space:]]+)?PATH=' "$file" || true)
           done
-
-          if echo "$root_path" | grep -Eq '(^|[:=])([.]|:|$)'; then
-            echo "FAIL: current/empty PATH entry found"
-            exit 1
-          fi
 
           echo "PASS: root PATH integrity verified"
       register: root_path_check
