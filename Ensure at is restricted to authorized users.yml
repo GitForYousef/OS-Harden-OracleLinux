@@ -1,0 +1,64 @@
+---
+- name: CIS 2.4.2.1 - Ensure at is restricted to authorized users
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Check if daemon group exists
+      ansible.builtin.getent:
+        database: group
+        key: daemon
+      register: daemon_group
+      failed_when: false
+
+    - name: Set at access file group
+      ansible.builtin.set_fact:
+        at_group: "{{ 'daemon' if daemon_group.ansible_facts.getent_group is defined and 'daemon' in daemon_group.ansible_facts.getent_group else 'root' }}"
+
+    - name: Create /etc/at.allow
+      ansible.builtin.file:
+        path: /etc/at.allow
+        state: touch
+        owner: root
+        group: "{{ at_group }}"
+        mode: '0640'
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Check if /etc/at.deny exists
+      ansible.builtin.stat:
+        path: /etc/at.deny
+      register: at_deny
+
+    - name: Restrict /etc/at.deny permissions
+      ansible.builtin.file:
+        path: /etc/at.deny
+        owner: root
+        group: "{{ at_group }}"
+        mode: '0640'
+      when: at_deny.stat.exists
+
+    - name: Verify /etc/at.allow
+      ansible.builtin.stat:
+        path: /etc/at.allow
+      register: at_allow_verify
+
+    - name: Verify /etc/at.deny
+      ansible.builtin.stat:
+        path: /etc/at.deny
+      register: at_deny_verify
+
+    - name: Assert CIS 2.4.2.1 compliance
+      ansible.builtin.assert:
+        that:
+          - at_allow_verify.stat.exists
+          - at_allow_verify.stat.pw_name == 'root'
+          - at_allow_verify.stat.gr_name == at_group
+          - (at_allow_verify.stat.mode | int(base=8)) <= 640
+          - not at_deny_verify.stat.exists or at_deny_verify.stat.pw_name == 'root'
+          - not at_deny_verify.stat.exists or at_deny_verify.stat.gr_name == at_group
+          - not at_deny_verify.stat.exists or (at_deny_verify.stat.mode | int(base=8)) <= 640
+        fail_msg: "CIS 2.4.2.1 FAILED - at access files are not compliant."
+        success_msg: "CIS 2.4.2.1 COMPLIANT - at is restricted to authorized users."
