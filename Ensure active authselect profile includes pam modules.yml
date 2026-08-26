@@ -1,0 +1,142 @@
+---
+- name: CIS 5.3.2.1 - Ensure active authselect profile includes pam modules
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Get active authselect profile
+      ansible.builtin.command:
+        cmd: authselect current -r
+      register: authselect_profile
+      changed_when: false
+
+    - name: Verify custom authselect profile is active
+      ansible.builtin.assert:
+        that:
+          - authselect_profile.stdout is search('^custom/')
+        fail_msg: >-
+          Active authselect profile is not a custom profile.
+          Current profile: {{ authselect_profile.stdout }}
+        success_msg: >-
+          Active custom authselect profile detected:
+          {{ authselect_profile.stdout }}
+
+    - name: Set authselect profile path
+      ansible.builtin.set_fact:
+        authselect_profile_path: "/etc/authselect/{{ authselect_profile.stdout | trim }}"
+
+    - name: Verify authselect profile templates exist
+      ansible.builtin.stat:
+        path: "{{ authselect_profile_path }}/{{ item }}"
+      loop:
+        - system-auth
+        - password-auth
+      register: authselect_template_files
+
+    - name: Assert authselect template files exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+        fail_msg: "Missing authselect template: {{ item.item }}"
+      loop: "{{ authselect_template_files.results }}"
+
+    - name: Backup authselect system-auth template
+      ansible.builtin.copy:
+        src: "{{ authselect_profile_path }}/system-auth"
+        dest: "{{ authselect_profile_path }}/system-auth.cis-backup"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+        force: false
+
+    - name: Backup authselect password-auth template
+      ansible.builtin.copy:
+        src: "{{ authselect_profile_path }}/password-auth"
+        dest: "{{ authselect_profile_path }}/password-auth.cis-backup"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+        force: false
+
+    - name: Add pam_faillock authfail to system-auth template
+      ansible.builtin.lineinfile:
+        path: "{{ authselect_profile_path }}/system-auth"
+        regexp: '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+authfail\b'
+        line: 'auth        required      pam_faillock.so authfail'
+        insertafter: '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+preauth\b'
+        state: present
+      register: system_auth_changed
+
+    - name: Add pam_faillock authfail to password-auth template
+      ansible.builtin.lineinfile:
+        path: "{{ authselect_profile_path }}/password-auth"
+        regexp: '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+authfail\b'
+        line: 'auth        required      pam_faillock.so authfail'
+        insertafter: '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+preauth\b'
+        state: present
+      register: password_auth_changed
+
+    - name: Verify pam_faillock entries in authselect templates
+      ansible.builtin.shell: |
+        echo "===== system-auth ====="
+        grep -nE 'pam_faillock\.so' "{{ authselect_profile_path }}/system-auth" || true
+
+        echo
+        echo "===== password-auth ====="
+        grep -nE 'pam_faillock\.so' "{{ authselect_profile_path }}/password-auth" || true
+      args:
+        executable: /bin/bash
+      register: faillock_template_check
+      changed_when: false
+
+    - name: Display authselect template configuration
+      ansible.builtin.debug:
+        msg: "{{ faillock_template_check.stdout_lines }}"
+
+    - name: Apply authselect changes
+      ansible.builtin.command:
+        cmd: authselect apply-changes
+      register: authselect_apply
+      when:
+        - system_auth_changed.changed or password_auth_changed.changed
+
+    - name: Verify generated system-auth
+      ansible.builtin.shell: |
+        grep -nE '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+authfail\b' /etc/pam.d/system-auth
+      args:
+        executable: /bin/bash
+      register: system_auth_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Verify generated password-auth
+      ansible.builtin.shell: |
+        grep -nE '^\s*auth\s+(required|requisite)\s+pam_faillock\.so\s+authfail\b' /etc/pam.d/password-auth
+      args:
+        executable: /bin/bash
+      register: password_auth_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Display generated PAM configuration
+      ansible.builtin.debug:
+        msg:
+          - "system-auth: {{ system_auth_verify.stdout_lines }}"
+          - "password-auth: {{ password_auth_verify.stdout_lines }}"
+
+    - name: Assert CIS 5.3.2.1 compliance
+      ansible.builtin.assert:
+        that:
+          - system_auth_verify.rc == 0
+          - password_auth_verify.rc == 0
+        success_msg: >-
+          CIS 5.3.2.1 compliant -
+          pam_faillock authfail is present in both system-auth and password-auth
+        fail_msg: >-
+          CIS 5.3.2.1 FAILED -
+          pam_faillock authfail is missing from one or both PAM files
