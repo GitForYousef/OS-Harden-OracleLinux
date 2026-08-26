@@ -1,0 +1,88 @@
+---
+- name: CIS 5.3.2.2 - Ensure pam_faillock module is enabled
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Get active authselect profile
+      ansible.builtin.command:
+        cmd: authselect current -r
+      register: authselect_profile
+      changed_when: false
+
+    - name: Determine authselect profile path
+      ansible.builtin.set_fact:
+        authselect_profile_path: >-
+          {{
+            '/etc/authselect/' + authselect_profile.stdout
+            if authselect_profile.stdout is match('^custom/')
+            else '/usr/share/authselect/default/' + authselect_profile.stdout
+          }}
+
+    - name: Check system-auth template
+      ansible.builtin.shell: |
+        grep -Pq '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*authfail\b' \
+        "{{ authselect_profile_path }}/system-auth"
+      register: system_authfail
+      changed_when: false
+      failed_when: false
+
+    - name: Check password-auth template
+      ansible.builtin.shell: |
+        grep -Pq '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*authfail\b' \
+        "{{ authselect_profile_path }}/password-auth"
+      register: password_authfail
+      changed_when: false
+      failed_when: false
+
+    - name: Add pam_faillock authfail to system-auth template
+      ansible.builtin.lineinfile:
+        path: "{{ authselect_profile_path }}/system-auth"
+        regexp: '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*authfail\b'
+        line: 'auth required pam_faillock.so authfail'
+        insertafter: '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*preauth\b'
+        state: present
+      when: system_authfail.rc != 0
+
+    - name: Add pam_faillock authfail to password-auth template
+      ansible.builtin.lineinfile:
+        path: "{{ authselect_profile_path }}/password-auth"
+        regexp: '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*authfail\b'
+        line: 'auth required pam_faillock.so authfail'
+        insertafter: '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*preauth\b'
+        state: present
+      when: password_authfail.rc != 0
+
+    - name: Apply authselect changes
+      ansible.builtin.command:
+        cmd: authselect apply-changes
+      when:
+        - system_authfail.rc != 0 or password_authfail.rc != 0
+      register: authselect_apply
+      changed_when: true
+
+    - name: Verify system-auth pam_faillock authfail
+      ansible.builtin.shell: |
+        grep -P '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*authfail\b' \
+        /etc/pam.d/system-auth
+      register: verify_system_auth
+      changed_when: false
+      failed_when: false
+
+    - name: Verify password-auth pam_faillock authfail
+      ansible.builtin.shell: |
+        grep -P '^\s*auth\s+(required|requisite)\s+.*pam_faillock\.so\s+.*authfail\b' \
+        /etc/pam.d/password-auth
+      register: verify_password_auth
+      changed_when: false
+      failed_when: false
+
+    - name: Assert CIS 5.3.2.2 compliance
+      ansible.builtin.assert:
+        that:
+          - verify_system_auth.rc == 0
+          - verify_password_auth.rc == 0
+        success_msg: "CIS 5.3.2.2 compliant - pam_faillock authfail is configured in system-auth and password-auth"
+        fail_msg: "CIS 5.3.2.2 failed - pam_faillock authfail is missing"
