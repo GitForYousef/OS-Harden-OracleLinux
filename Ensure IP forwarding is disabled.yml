@@ -1,0 +1,78 @@
+---
+- name: CIS 3.3.1 - Ensure IP forwarding is disabled
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Configure IPv4 IP forwarding
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/60-netipv4-ip-forwarding.conf
+        regexp: '^\s*net\.ipv4\.ip_forward\s*='
+        line: 'net.ipv4.ip_forward = 0'
+        create: true
+        mode: '0644'
+        backup: true
+
+    - name: Configure IPv6 IP forwarding
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/60-netipv6-ip-forwarding.conf
+        regexp: '^\s*net\.ipv6\.conf\.all\.forwarding\s*='
+        line: 'net.ipv6.conf.all.forwarding = 0'
+        create: true
+        mode: '0644'
+        backup: true
+
+    - name: Apply IPv4 IP forwarding setting
+      ansible.builtin.command:
+        cmd: sysctl -w net.ipv4.ip_forward=0
+      changed_when: true
+
+    - name: Flush IPv4 route cache
+      ansible.builtin.command:
+        cmd: sysctl -w net.ipv4.route.flush=1
+      changed_when: true
+
+    - name: Apply IPv6 IP forwarding setting
+      ansible.builtin.command:
+        cmd: sysctl -w net.ipv6.conf.all.forwarding=0
+      changed_when: true
+
+    - name: Flush IPv6 route cache
+      ansible.builtin.command:
+        cmd: sysctl -w net.ipv6.route.flush=1
+      changed_when: true
+      failed_when: false
+
+    - name: Reload sysctl configuration
+      ansible.builtin.command:
+        cmd: sysctl --system
+      register: sysctl_reload
+      changed_when: true
+
+    - name: Verify IPv4 forwarding
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv4.ip_forward
+      register: ipv4_forwarding
+      changed_when: false
+
+    - name: Verify IPv6 forwarding
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv6.conf.all.forwarding
+      register: ipv6_forwarding
+      changed_when: false
+
+    - name: Display forwarding status
+      ansible.builtin.debug:
+        msg:
+          - "net.ipv4.ip_forward = {{ ipv4_forwarding.stdout }}"
+          - "net.ipv6.conf.all.forwarding = {{ ipv6_forwarding.stdout }}"
+
+    - name: Assert CIS 3.3.1 compliance
+      ansible.builtin.assert:
+        that:
+          - ipv4_forwarding.stdout | trim == "0"
+          - ipv6_forwarding.stdout | trim == "0"
+        success_msg: "CIS 3.3.1 compliant - IP forwarding is disabled"
+        fail_msg: "CIS 3.3.1 FAILED - IP forwarding is still enabled"
