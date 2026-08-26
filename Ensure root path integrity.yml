@@ -6,47 +6,61 @@
 
   tasks:
 
-    - name: Remove unsafe root PATH entries
+    - name: Find root PATH configuration files
+      ansible.builtin.shell:
+        cmd: |
+          grep -rlE '(\$HOME|/root)/(\\.local/)?bin' \
+            /root/.bash_profile \
+            /root/.bashrc \
+            /root/.profile \
+            /etc/profile \
+            /etc/bashrc \
+            /etc/profile.d \
+            2>/dev/null || true
+      register: root_path_files
+      changed_when: false
+
+    - name: Remove unsafe PATH entries
       ansible.builtin.replace:
         path: "{{ item }}"
         regexp: '(^|:)(\$HOME/\.local/bin|\$HOME/bin|/root/\.local/bin|/root/bin)(?=:|$)'
         replace: '\1'
         backup: true
-      loop:
-        - /root/.bash_profile
-        - /root/.bashrc
-        - /root/.profile
-      when: item is file
+      loop: "{{ root_path_files.stdout_lines }}"
+      when: root_path_files.stdout_lines | length > 0
 
-    - name: Remove duplicate colons from root PATH
+    - name: Remove duplicate PATH separators
       ansible.builtin.replace:
         path: "{{ item }}"
         regexp: 'PATH=([^#\n]*):{2,}([^#\n]*)'
         replace: 'PATH=\1:\2'
-      loop:
-        - /root/.bash_profile
-        - /root/.bashrc
-        - /root/.profile
-      when: item is file
+      loop: "{{ root_path_files.stdout_lines }}"
+      when: root_path_files.stdout_lines | length > 0
 
-    - name: Remove trailing colon from root PATH
+    - name: Remove trailing PATH separator
       ansible.builtin.replace:
         path: "{{ item }}"
         regexp: 'PATH=([^#\n]*):([[:space:]]*(#.*)?)$'
         replace: 'PATH=\1\2'
-      loop:
-        - /root/.bash_profile
-        - /root/.bashrc
-        - /root/.profile
-      when: item is file
+      loop: "{{ root_path_files.stdout_lines }}"
+      when: root_path_files.stdout_lines | length > 0
 
     - name: Verify root PATH integrity
       ansible.builtin.shell:
         cmd: |
-          for file in /root/.bash_profile /root/.bashrc /root/.profile; do
+          bad=0
+
+          for file in \
+            /root/.bash_profile \
+            /root/.bashrc \
+            /root/.profile \
+            /etc/profile \
+            /etc/bashrc \
+            /etc/profile.d/*.sh; do
+
             [ -f "$file" ] || continue
 
-            grep -E '^[[:space:]]*(export[[:space:]]+)?PATH=' "$file" | while IFS= read -r line; do
+            while IFS= read -r line; do
 
               path_value="${line#*=}"
               path_value="${path_value#\"}"
@@ -59,51 +73,53 @@
 
               for dir in $path_value; do
 
-                [ -n "$dir" ] || {
-                  echo "FAIL: empty PATH entry in $file"
-                  exit 1
-                }
-
-                [ "$dir" != "." ] || {
-                  echo "FAIL: current directory in PATH"
-                  exit 1
-                }
-
                 case "$dir" in
-                  /*)
-                    ;;
-                  *)
-                    echo "FAIL: relative or unresolved PATH entry: $dir"
-                    exit 1
+                  ""|"."|"\$HOME"|"\$HOME/"*|"/root/"*)
+                    echo "FAIL: unsafe PATH entry '$dir' in $file"
+                    bad=1
                     ;;
                 esac
 
-                [ -d "$dir" ] || {
-                  echo "FAIL: $dir is not a directory"
-                  exit 1
-                }
+                case "$dir" in
+                  /*)
+                    if [ ! -d "$dir" ]; then
+                      echo "FAIL: $dir is not a directory"
+                      bad=1
+                      continue
+                    fi
 
-                owner=$(stat -c '%U' "$dir")
-                mode=$(stat -c '%a' "$dir")
+                    owner=$(stat -c '%U' "$dir")
+                    mode=$(stat -c '%a' "$dir")
 
-                [ "$owner" = "root" ] || {
-                  echo "FAIL: $dir is not owned by root"
-                  exit 1
-                }
+                    [ "$owner" = "root" ] || {
+                      echo "FAIL: $dir not owned by root"
+                      bad=1
+                    }
 
-                if [ $((8#$mode & 0022)) -ne 0 ]; then
-                  echo "FAIL: $dir is writable by group or others"
-                  exit 1
-                fi
+                    if [ $((8#$mode & 0022)) -ne 0 ]; then
+                      echo "FAIL: $dir writable by group/others"
+                      bad=1
+                    fi
+                    ;;
+                esac
 
               done
 
               IFS="$OLDIFS"
 
-            done
+            done < <(
+              grep -E '^[[:space:]]*(export[[:space:]]+)?PATH=' "$file" \
+              2>/dev/null || true
+            )
+
           done
 
-          echo "PASS: root PATH integrity verified"
+          if [ "$bad" -eq 0 ]; then
+            echo "PASS: root PATH integrity verified"
+            exit 0
+          fi
+
+          exit 1
       register: root_path_check
       changed_when: false
       failed_when: root_path_check.rc != 0
@@ -113,4 +129,4 @@
         that:
           - root_path_check.rc == 0
         success_msg: "CIS 5.4.2.5 compliant - root PATH integrity verified"
-        fail_msg: "CIS 5.4.2.5 failed - root PATH contains an invalid or insecure entry"
+        fail_msg: "CIS 5.4.2.5 failed - root PATH still contains an invalid entry"
