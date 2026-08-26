@@ -1,0 +1,100 @@
+---
+- name: CIS 1.6.3 - Ensure system wide crypto policy disables SHA1
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Get current crypto policy
+      ansible.builtin.command:
+        cmd: update-crypto-policies --show
+      register: crypto_policy
+      changed_when: false
+
+    - name: Display current crypto policy
+      ansible.builtin.debug:
+        msg: "Current crypto policy: {{ crypto_policy.stdout | trim }}"
+
+    - name: Create crypto policy modules directory
+      ansible.builtin.file:
+        path: /etc/crypto-policies/policies/modules
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create NO-SHA1 crypto policy module
+      ansible.builtin.copy:
+        dest: /etc/crypto-policies/policies/modules/NO-SHA1.pmod
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Disable SHA-1 hash and signature support
+          hash = -SHA1
+          sign = -*-SHA1
+          sha1_in_certs = 0
+      register: no_sha1_module
+
+    - name: Determine base crypto policy
+      ansible.builtin.set_fact:
+        base_crypto_policy: "{{ crypto_policy.stdout | trim | split(':') | first }}"
+
+    - name: Check whether NO-SHA1 is already applied
+      ansible.builtin.set_fact:
+        no_sha1_already_enabled: >-
+          {{
+            'NO-SHA1' in
+            (crypto_policy.stdout | trim | split(':'))
+          }}
+
+    - name: Apply NO-SHA1 crypto policy
+      ansible.builtin.command:
+        cmd: "update-crypto-policies --set {{ base_crypto_policy }}:NO-SHA1"
+      when: not no_sha1_already_enabled
+
+    - name: Verify crypto policy after remediation
+      ansible.builtin.command:
+        cmd: update-crypto-policies --show
+      register: crypto_policy_after
+      changed_when: false
+
+    - name: Display active crypto policy
+      ansible.builtin.debug:
+        msg: "Active crypto policy: {{ crypto_policy_after.stdout | trim }}"
+
+    - name: Verify SHA-1 is disabled in CURRENT.pol
+      ansible.builtin.shell: |
+        awk -F= '
+          ($1 ~ /^(hash|sign)$/ && $2 ~ /SHA1/ && $2 !~ /^\s*-\s*([^#\n\r]+)?SHA1/) {
+            print
+          }
+        ' /etc/crypto-policies/state/CURRENT.pol
+      register: sha1_check
+      changed_when: false
+
+    - name: Verify sha1_in_certs is disabled
+      ansible.builtin.shell: |
+        grep -E '^[[:space:]]*sha1_in_certs[[:space:]]*=[[:space:]]*0\b' \
+        /etc/crypto-policies/state/CURRENT.pol
+      register: sha1_certs_check
+      changed_when: false
+
+    - name: Display SHA-1 verification
+      ansible.builtin.debug:
+        msg:
+          - "SHA-1 hash/signature check:"
+          - "{{ sha1_check.stdout_lines }}"
+          - "sha1_in_certs check:"
+          - "{{ sha1_certs_check.stdout_lines }}"
+
+    - name: Assert CIS 1.6.3 compliance
+      ansible.builtin.assert:
+        that:
+          - sha1_check.stdout | trim == ''
+          - sha1_certs_check.rc == 0
+        fail_msg: >-
+          CIS 1.6.3 FAILED - SHA-1 hash/signature support is still enabled.
+        success_msg: >-
+          CIS 1.6.3 COMPLIANT - SHA-1 hash/signature support is disabled.
