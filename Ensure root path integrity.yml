@@ -6,10 +6,10 @@
 
   tasks:
 
-    - name: Remove /root/.local/bin from root PATH
+    - name: Remove unsafe root PATH entries
       ansible.builtin.replace:
         path: "{{ item }}"
-        regexp: '(^|:)/root/\.local/bin(?=:|$)'
+        regexp: '(^|:)(\$HOME/\.local/bin|\$HOME/bin|/root/\.local/bin|/root/bin)(?=:|$)'
         replace: '\1'
         backup: true
       loop:
@@ -18,19 +18,7 @@
         - /root/.profile
       when: item is file
 
-    - name: Remove /root/bin from root PATH
-      ansible.builtin.replace:
-        path: "{{ item }}"
-        regexp: '(^|:)/root/bin(?=:|$)'
-        replace: '\1'
-        backup: true
-      loop:
-        - /root/.bash_profile
-        - /root/.bashrc
-        - /root/.profile
-      when: item is file
-
-    - name: Clean duplicate colons in root PATH definitions
+    - name: Remove duplicate colons from root PATH
       ansible.builtin.replace:
         path: "{{ item }}"
         regexp: 'PATH=([^#\n]*):{2,}([^#\n]*)'
@@ -41,15 +29,25 @@
         - /root/.profile
       when: item is file
 
-    - name: Verify root PATH definitions
+    - name: Remove trailing colon from root PATH
+      ansible.builtin.replace:
+        path: "{{ item }}"
+        regexp: 'PATH=([^#\n]*):([[:space:]]*(#.*)?)$'
+        replace: 'PATH=\1\2'
+      loop:
+        - /root/.bash_profile
+        - /root/.bashrc
+        - /root/.profile
+      when: item is file
+
+    - name: Verify root PATH integrity
       ansible.builtin.shell:
         cmd: |
-          found=0
-
           for file in /root/.bash_profile /root/.bashrc /root/.profile; do
             [ -f "$file" ] || continue
 
-            while IFS= read -r line; do
+            grep -E '^[[:space:]]*(export[[:space:]]+)?PATH=' "$file" | while IFS= read -r line; do
+
               path_value="${line#*=}"
               path_value="${path_value#\"}"
               path_value="${path_value%\"}"
@@ -60,13 +58,14 @@
               IFS=':'
 
               for dir in $path_value; do
+
                 [ -n "$dir" ] || {
                   echo "FAIL: empty PATH entry in $file"
                   exit 1
                 }
 
                 [ "$dir" != "." ] || {
-                  echo "FAIL: current directory in PATH: $file"
+                  echo "FAIL: current directory in PATH"
                   exit 1
                 }
 
@@ -74,7 +73,7 @@
                   /*)
                     ;;
                   *)
-                    echo "FAIL: relative PATH entry: $dir"
+                    echo "FAIL: relative or unresolved PATH entry: $dir"
                     exit 1
                     ;;
                 esac
@@ -93,14 +92,15 @@
                 }
 
                 if [ $((8#$mode & 0022)) -ne 0 ]; then
-                  echo "FAIL: $dir is writable by group/others"
+                  echo "FAIL: $dir is writable by group or others"
                   exit 1
                 fi
+
               done
 
               IFS="$OLDIFS"
 
-            done < <(grep -E '^[[:space:]]*(export[[:space:]]+)?PATH=' "$file" || true)
+            done
           done
 
           echo "PASS: root PATH integrity verified"
