@@ -1,0 +1,16 @@
+---
+- name: CIS 1.7.3 - Ensure remote login warning banner is configured properly
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Configure remote login warning banner
+      ansible.builtin.copy:
+        dest: /etc/issue.net
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          Authorized users only. All activity may be monitored and reported.
