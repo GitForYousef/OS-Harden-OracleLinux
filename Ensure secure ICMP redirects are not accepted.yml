@@ -1,0 +1,75 @@
+---
+- name: CIS 3.3.6 - Ensure secure ICMP redirects are not accepted
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: Configure IPv4 secure ICMP redirects
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/60-netipv4-secure-redirects.conf
+        regexp: '^\s*net\.ipv4\.conf\.all\.secure_redirects\s*='
+        line: 'net.ipv4.conf.all.secure_redirects = 0'
+        create: true
+        mode: '0644'
+        backup: true
+
+    - name: Configure IPv4 default secure ICMP redirects
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/60-netipv4-secure-redirects.conf
+        regexp: '^\s*net\.ipv4\.conf\.default\.secure_redirects\s*='
+        line: 'net.ipv4.conf.default.secure_redirects = 0'
+        create: true
+        mode: '0644'
+        backup: true
+
+    - name: Disable secure ICMP redirects for all interfaces
+      ansible.builtin.command:
+        cmd: sysctl -w net.ipv4.conf.all.secure_redirects=0
+      register: secure_redirects_all
+      changed_when: true
+
+    - name: Disable secure ICMP redirects for default interface
+      ansible.builtin.command:
+        cmd: sysctl -w net.ipv4.conf.default.secure_redirects=0
+      register: secure_redirects_default
+      changed_when: true
+
+    - name: Flush IPv4 route cache
+      ansible.builtin.command:
+        cmd: sysctl -w net.ipv4.route.flush=1
+      changed_when: true
+      failed_when: false
+
+    - name: Reload sysctl configuration
+      ansible.builtin.command:
+        cmd: sysctl --system
+      register: sysctl_reload
+      changed_when: true
+
+    - name: Verify all secure redirects
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv4.conf.all.secure_redirects
+      register: secure_redirects_all_check
+      changed_when: false
+
+    - name: Verify default secure redirects
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv4.conf.default.secure_redirects
+      register: secure_redirects_default_check
+      changed_when: false
+
+    - name: Display secure ICMP redirect settings
+      ansible.builtin.debug:
+        msg:
+          - "net.ipv4.conf.all.secure_redirects = {{ secure_redirects_all_check.stdout }}"
+          - "net.ipv4.conf.default.secure_redirects = {{ secure_redirects_default_check.stdout }}"
+
+    - name: Assert CIS 3.3.6 compliance
+      ansible.builtin.assert:
+        that:
+          - secure_redirects_all_check.stdout | trim == "0"
+          - secure_redirects_default_check.stdout | trim == "0"
+        success_msg: "CIS 3.3.6 compliant - secure ICMP redirects are disabled"
+        fail_msg: "CIS 3.3.6 FAILED - secure ICMP redirects are still enabled"
