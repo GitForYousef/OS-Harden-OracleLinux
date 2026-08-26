@@ -24,18 +24,20 @@
         state: absent
 
     - name: Verify rpcbind package is absent
-      ansible.builtin.rpm:
-        name: rpcbind
-        state: absent
+      ansible.builtin.command:
+        cmd: rpm -q rpcbind
+      register: rpcbind_package
+      changed_when: false
+      failed_when: rpcbind_package.rc == 0
 
-    - name: Check rpcbind socket state
+    - name: Verify rpcbind socket is not active
       ansible.builtin.command:
         cmd: systemctl is-active rpcbind.socket
       register: rpcbind_socket_status
       changed_when: false
       failed_when: false
 
-    - name: Check rpcbind service state
+    - name: Verify rpcbind service is not active
       ansible.builtin.command:
         cmd: systemctl is-active rpcbind.service
       register: rpcbind_service_status
@@ -45,6 +47,7 @@
     - name: Assert CIS 2.1.12 compliance
       ansible.builtin.assert:
         that:
+          - rpcbind_package.rc != 0
           - rpcbind_socket_status.stdout | trim != "active"
           - rpcbind_service_status.stdout | trim != "active"
         success_msg: "CIS 2.1.12 compliant - rpcbind services are not in use"
