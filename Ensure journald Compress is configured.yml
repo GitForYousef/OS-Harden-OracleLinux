@@ -26,11 +26,11 @@
         backup: true
       register: journald_compress
 
-    - name: Reload or restart systemd-journald
-      ansible.builtin.systemd:
-        name: systemd-journald
-        state: reloaded
+    - name: Restart systemd-journald
+      ansible.builtin.command:
+        cmd: systemctl restart systemd-journald
       when: journald_compress.changed
+      changed_when: true
 
     - name: Verify journald Compress configuration
       ansible.builtin.shell:
