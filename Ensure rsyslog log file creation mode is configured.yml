@@ -53,6 +53,6 @@
     - name: Assert CIS 6.2.3.4 compliance
       ansible.builtin.assert:
         that:
-          - filecreatemode_check.stdout is search('\$FileCreateMode[[:space:]]+0640')
+          - "'$FileCreateMode 0640' in filecreatemode_check.stdout"
         success_msg: "CIS 6.2.3.4 compliant - rsyslog FileCreateMode is 0640"
         fail_msg: "CIS 6.2.3.4 FAILED - rsyslog FileCreateMode 0640 was not found"
