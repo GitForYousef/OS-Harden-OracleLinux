@@ -1,0 +1,41 @@
+---
+- name: Disable and unload cramfs kernel module
+  hosts: all
+  become: true
+
+  tasks:
+
+    - name: Create modprobe configuration for cramfs
+      copy:
+        dest: /etc/modprobe.d/cramfs.conf
+        content: |
+          install cramfs /bin/false
+          blacklist cramfs
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Check if cramfs module is loaded
+      shell: lsmod | grep -w cramfs
+      register: cramfs_loaded
+      failed_when: false
+      changed_when: false
+
+    - name: Unload cramfs module
+      shell: |
+        modprobe -r cramfs 2>/dev/null || true
+        rmmod cramfs 2>/dev/null || true
+      when: cramfs_loaded.rc == 0
+
+    - name: Rebuild initramfs (optional but recommended)
+      command: dracut -f
+      changed_when: true
+
+    - name: Verify cramfs module is disabled
+      command: modprobe -n -v cramfs
+      register: cramfs_verify
+      changed_when: false
+
+    - name: Display verification output
+      debug:
+        var: cramfs_verify.stdout_lines
