@@ -1,288 +1,184 @@
----
 - name: CIS 7.2.9 - Ensure local interactive user dot files access is configured
   hosts: all
   become: true
   gather_facts: false
 
-  vars:
-    max_dot_file_users: 1000
-
   tasks:
-
-    # ------------------------------------------------------------
-    # Determine valid interactive shells
-    # Any shell in /etc/shells that is NOT nologin is considered
-    # an interactive/valid shell.
-    # ------------------------------------------------------------
-
-    - name: Get valid interactive shells
-      ansible.builtin.shell: |
-        awk -F/ '$NF != "nologin" {print}' /etc/shells
-      register: valid_shells_result
-      changed_when: false
-
-    - name: Build valid shell list
-      ansible.builtin.set_fact:
-        valid_shells: "{{ valid_shells_result.stdout_lines | default([]) }}"
-
-
-    # ------------------------------------------------------------
-    # Get local users whose shell is one of the valid shells.
-    #
-    # We deliberately use /etc/passwd rather than getent so that
-    # AD/LDAP users are not included.
-    # ------------------------------------------------------------
 
     - name: Get local interactive users
       ansible.builtin.shell: |
         awk -F: '
         BEGIN {
-          n = split("{{ valid_shells | join("|") }}", shells, "|")
-        }
-        {
-          for (i = 1; i <= n; i++) {
-            if ($7 == shells[i]) {
-              print $1 ":" $6
+          while ((getline line < "/etc/shells") > 0) {
+            if (line !~ /^[[:space:]]*#/ &&
+                line !~ /\/nologin$/ &&
+                line ~ /^\//) {
+              shells[line] = 1
             }
           }
+          close("/etc/shells")
+        }
+        {
+          if (($7 in shells) && ($6 != "") && ($6 != "/")) {
+            print $1 ":" $6
+          }
         }' /etc/passwd
-      register: interactive_users_result
+      register: interactive_users
       changed_when: false
-
 
     - name: Display local interactive users
       ansible.builtin.debug:
-        msg: "{{ interactive_users_result.stdout_lines }}"
-
-
-    # ------------------------------------------------------------
-    # Find all hidden files in each interactive user's home.
-    #
-    # -xdev prevents crossing into another filesystem.
-    # This matches the CIS remediation script.
-    # ------------------------------------------------------------
+        var: interactive_users.stdout_lines
 
     - name: Find dot files in interactive user home directories
-      ansible.builtin.find:
-        paths: "{{ item.split(':')[1] }}"
-        patterns: ".*"
-        file_type: file
-        recurse: true
-        excludes: ""
-        use_regex: false
-      loop: "{{ interactive_users_result.stdout_lines }}"
-      register: dot_files_result
-      when:
-        - item.split(':') | length == 2
-        - item.split(':')[1] | length > 0
-        - item.split(':')[1] != "/"
+      ansible.builtin.shell: |
+        home="{{ item.split(':', 1)[1] }}"
+
+        if [ -d "$home" ]; then
+          find "$home" -xdev -type f -name '.*' -print
+        fi
+      loop: "{{ interactive_users.stdout_lines }}"
+      register: user_dot_files
+      changed_when: false
       loop_control:
         label: "{{ item }}"
 
-
-    # ------------------------------------------------------------
-    # Remove group/other write and execute permissions from
-    # normal dot files.
-    #
-    # CIS:
-    #   l_mask='0133'
-    #   l_change="u-x,go-wx"
-    #
-    # Maximum resulting permission = 0644
-    # ------------------------------------------------------------
-
-    - name: Secure normal dot files to maximum 0644
-      ansible.builtin.file:
-        path: "{{ item.1.path }}"
-        mode: "0644"
-      loop: "{{ query('subelements', dot_files_result.results, 'files') }}"
-      when:
-        - item.1.path | basename not in ['.forward', '.rhost', '.netrc', '.bash_history']
-      loop_control:
-        label: "{{ item.1.path }}"
-
-
-    # ------------------------------------------------------------
-    # .netrc
-    #
-    # CIS:
-    #   l_mask='0177'
-    #   l_change="u-x,go-rwx"
-    #
-    # Maximum resulting permission = 0600
-    # ------------------------------------------------------------
-
-    - name: Secure .netrc files
-      ansible.builtin.file:
-        path: "{{ item.1.path }}"
-        mode: "0600"
-      loop: "{{ query('subelements', dot_files_result.results, 'files') }}"
-      when:
-        - item.1.path | basename == '.netrc'
-      loop_control:
-        label: "{{ item.1.path }}"
-
-
-    # ------------------------------------------------------------
-    # .bash_history
-    #
-    # CIS:
-    #   l_mask='0177'
-    #   l_change="u-x,go-rwx"
-    #
-    # Maximum resulting permission = 0600
-    # ------------------------------------------------------------
-
-    - name: Secure .bash_history files
-      ansible.builtin.file:
-        path: "{{ item.1.path }}"
-        mode: "0600"
-      loop: "{{ query('subelements', dot_files_result.results, 'files') }}"
-      when:
-        - item.1.path | basename == '.bash_history'
-      loop_control:
-        label: "{{ item.1.path }}"
-
-
-    # ------------------------------------------------------------
-    # Correct ownership of dot files.
-    #
-    # Every dot file must be owned by the corresponding user and
-    # the user's primary group.
-    # ------------------------------------------------------------
-
-    - name: Get primary group for each interactive user
+    - name: Fix dot file permissions and ownership
       ansible.builtin.shell: |
-        id -gn "{{ item.split(':')[0] }}"
-      loop: "{{ interactive_users_result.stdout_lines }}"
-      register: user_primary_groups
-      changed_when: false
-      when:
-        - item.split(':') | length == 2
+        user="{{ item.item.split(':', 1)[0] }}"
+        home="{{ item.item.split(':', 1)[1] }}"
+        group="$(id -gn "$user")"
+        changed=0
+
+        if [ ! -d "$home" ]; then
+          exit 0
+        fi
+
+        while IFS= read -r -d '' file; do
+          base="$(basename "$file")"
+          before="$(stat -c '%a:%U:%G' "$file")"
+
+          case "$base" in
+
+            .forward|.rhost)
+              continue
+              ;;
+
+            .netrc|.bash_history)
+              chmod u-x,go-rwx "$file"
+              chown "$user:$group" "$file"
+              ;;
+
+            *)
+              chmod u-x,go-wx "$file"
+              chown "$user:$group" "$file"
+              ;;
+
+          esac
+
+          after="$(stat -c '%a:%U:%G' "$file")"
+
+          if [ "$before" != "$after" ]; then
+            changed=1
+          fi
+
+        done < <(find "$home" -xdev -type f -name '.*' -print0)
+
+        if [ "$changed" -eq 1 ]; then
+          echo "CHANGED"
+        fi
+      loop: "{{ user_dot_files.results }}"
+      register: dot_file_remediation
+      changed_when: "'CHANGED' in dot_file_remediation.stdout"
       loop_control:
-        label: "{{ item.split(':')[0] }}"
-
-
-    - name: Correct ownership of dot files
-      ansible.builtin.file:
-        path: "{{ item.1.path }}"
-        owner: "{{ item.0.item.split(':')[0] }}"
-        group: "{{ user_primary_groups.results[item.0_index].stdout | trim }}"
-      loop: >-
-        {{
-          dot_files_result.results
-          | zip(range(0, dot_files_result.results | length))
-          | list
-          | map('list')
-          | list
-          | subelements('0.files')
-        }}
-      when: false
-      loop_control:
-        label: "{{ item.1.path }}"
-
-
-    # ------------------------------------------------------------
-    # Ownership remediation.
-    #
-    # The previous task is intentionally not used because Ansible's
-    # nested loop indexing is unnecessarily complex.
-    #
-    # Instead process each user separately.
-    # ------------------------------------------------------------
-
-    - name: Process ownership for each interactive user's dot files
-      block:
-
-        - name: Get primary group
-          ansible.builtin.command:
-            cmd: id -gn "{{ user_item.split(':')[0] }}"
-          register: primary_group
-          changed_when: false
-
-        - name: Find dot files for ownership remediation
-          ansible.builtin.find:
-            paths: "{{ user_item.split(':')[1] }}"
-            patterns: ".*"
-            file_type: file
-            recurse: true
-          register: ownership_dot_files
-          when:
-            - user_item.split(':')[1] != "/"
-
-        - name: Set dot file ownership
-          ansible.builtin.file:
-            path: "{{ dot_file.path }}"
-            owner: "{{ user_item.split(':')[0] }}"
-            group: "{{ primary_group.stdout | trim }}"
-          loop: "{{ ownership_dot_files.files | default([]) }}"
-          loop_control:
-            loop_var: dot_file
-            label: "{{ dot_file.path }}"
-
-      loop: "{{ interactive_users_result.stdout_lines }}"
-      loop_control:
-        loop_var: user_item
-        label: "{{ user_item }}"
-
-
-    # ------------------------------------------------------------
-    # .forward and .rhost
-    #
-    # CIS specifically says these should be investigated and
-    # manually deleted.
-    #
-    # We DO NOT delete them automatically.
-    # ------------------------------------------------------------
+        label: "{{ item.item }}"
 
     - name: Find .forward and .rhost files
-      ansible.builtin.find:
-        paths: "{{ item.split(':')[1] }}"
-        patterns:
-          - ".forward"
-          - ".rhost"
-        file_type: file
-        recurse: true
-      loop: "{{ interactive_users_result.stdout_lines }}"
-      register: dangerous_dot_files
-      when:
-        - item.split(':') | length == 2
-        - item.split(':')[1] != "/"
+      ansible.builtin.shell: |
+        home="{{ item.split(':', 1)[1] }}"
+
+        if [ -d "$home" ]; then
+          find "$home" -xdev -type f \
+            \( -name '.forward' -o -name '.rhost' \) \
+            -print
+        fi
+      loop: "{{ interactive_users.stdout_lines }}"
+      register: forward_rhost_files
+      changed_when: false
       loop_control:
         label: "{{ item }}"
 
-
-    - name: Report .forward and .rhost files for manual review
+    - name: Report .forward and .rhost files
       ansible.builtin.debug:
-        msg:
-          - "WARNING: Review and manually remove this file if not required:"
-          - "{{ item.1.path }}"
-      loop: "{{ query('subelements', dangerous_dot_files.results, 'files') }}"
+        msg: |
+          WARNING - Manual review required.
+          User/Home: {{ item.item }}
+          Files:
+          {{ item.stdout }}
+      loop: "{{ forward_rhost_files.results }}"
       when:
-        - dangerous_dot_files.results | length > 0
+        - item.stdout | trim | length > 0
       loop_control:
-        label: "{{ item.1.path }}"
+        label: "{{ item.item }}"
 
-
-    # ------------------------------------------------------------
-    # Final verification - files with excessive permissions
-    # ------------------------------------------------------------
-
-    - name: Find dot files with group/other write or execute permissions
+    - name: Verify dot files with excessive permissions
       ansible.builtin.shell: |
-        find /home -xdev -type f -name '.*' \
-          \( -perm /0133 \) \
-          -printf '%m %u %g %p\n'
-      register: remaining_dot_permission_findings
+        find /home -xdev -type f -name '.*' -perm /0133 -printf '%m %u %g %p\n'
+      register: permission_check
       changed_when: false
       failed_when: false
 
-
-    - name: Display remaining dot file permission findings
+    - name: Display permission verification
       ansible.builtin.debug:
         msg: >-
           {{
-            remaining_dot_permission_findings.stdout_lines
-            if remaining_dot_permission_findings.stdout_lines | length > 0
-            else ['PASS - No dot files with excessive permissions found under /home']
+            permission_check.stdout_lines
+            if permission_check.stdout_lines | length > 0
+            else ['PASS - No dot files with excessive permissions found']
+          }}
+
+    - name: Verify dot file ownership
+      ansible.builtin.shell: |
+        awk -F: '
+        BEGIN {
+          while ((getline line < "/etc/shells") > 0) {
+            if (line !~ /^[[:space:]]*#/ &&
+                line !~ /\/nologin$/ &&
+                line ~ /^\//) {
+              shells[line] = 1
+            }
+          }
+          close("/etc/shells")
+        }
+        {
+          if (($7 in shells) && ($6 != "") && ($6 != "/")) {
+            print $1 ":" $6
+          }
+        }' /etc/passwd |
+        while IFS=: read -r user home; do
+          [ -d "$home" ] || continue
+
+          primary_group="$(id -gn "$user")"
+
+          find "$home" -xdev -type f -name '.*' \
+            ! -name '.forward' \
+            ! -name '.rhost' \
+            -printf '%u:%g:%p\n' |
+          while IFS=: read -r owner group file; do
+            if [ "$owner" != "$user" ] || [ "$group" != "$primary_group" ]; then
+              echo "$owner:$group:$file (expected $user:$primary_group)"
+            fi
+          done
+        done
+      register: ownership_check
+      changed_when: false
+      failed_when: false
+
+    - name: Display ownership verification
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            ownership_check.stdout_lines
+            if ownership_check.stdout_lines | length > 0
+            else ['PASS - Dot file ownership is correctly configured']
           }}
