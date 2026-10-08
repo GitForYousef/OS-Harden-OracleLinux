@@ -1,0 +1,245 @@
+---
+
+* name: CIS 6.2.4.1 - Ensure access to all logfiles is configured
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+  * name: Find log files with insecure permissions or ownership
+    ansible.builtin.shell: |
+    find -L /var/log -type f \(-perm /0137 -o ! -user root -o ! -group root\) -print
+    args:
+    executable: /bin/bash
+    register: log_files
+    changed_when: false
+
+  * name: Get UID_MIN from login.defs
+    ansible.builtin.shell: |
+    awk '/^[[:space:]]*UID_MIN[[:space:]]/ {print $2}' /etc/login.defs
+    args:
+    executable: /bin/bash
+    register: uid_min_result
+    changed_when: false
+
+  * name: Set UID_MIN fact
+    ansible.builtin.set_fact:
+    uid_min: "{{ uid_min_result.stdout | trim | default('1000', true) }}"
+
+  * name: Fix logfile permissions and ownership
+    ansible.builtin.shell: |
+    set -u
+
+    file="{{ item }}"
+
+    [ -e "$file" ] || exit 0
+
+    bname="$(basename "$file")"
+
+    mode="$(stat -Lc '%#a' "$file")"
+    user="$(stat -Lc '%U' "$file")"
+    uid="$(stat -Lc '%u' "$file")"
+    group="$(stat -Lc '%G' "$file")"
+    gid="$(stat -Lc '%g' "$file")"
+
+    case "$bname" in
+
+    ```
+    lastlog|lastlog.*|wtmp|wtmp.*|wtmp-*|btmp|btmp.*|btmp-*|README)
+      perm_mask='0113'
+      rperms='ug-x,o-wx'
+      allowed_users='^(root)$'
+      allowed_groups='^(root|utmp)$'
+      target_user='root'
+      target_group='root'
+      ;;
+
+    secure|auth.log|syslog|messages)
+      perm_mask='0137'
+      rperms='u-x,g-wx,o-rwx'
+      allowed_users='^(root|syslog)$'
+      allowed_groups='^(root|adm)$'
+      target_user='root'
+      target_group='root'
+      ;;
+
+    SSSD|sssd)
+      perm_mask='0117'
+      rperms='ug-x,o-rwx'
+      allowed_users='^(root|SSSD)$'
+      allowed_groups='^(root|SSSD)$'
+      target_user='root'
+      target_group='root'
+      ;;
+
+    gdm|gdm3)
+      perm_mask='0117'
+      rperms='ug-x,o-rwx'
+      allowed_users='^(root)$'
+      allowed_groups='^(root|gdm|gdm3)$'
+      target_user='root'
+      target_group='root'
+      ;;
+
+    *.journal|*.journal~)
+      perm_mask='0137'
+      rperms='u-x,g-wx,o-rwx'
+      allowed_users='^(root)$'
+      allowed_groups='^(root|systemd-journal)$'
+      target_user='root'
+      target_group='root'
+      ;;
+
+    *)
+      perm_mask='0137'
+      rperms='u-x,g-wx,o-rwx'
+      allowed_users='^(root|syslog)$'
+      allowed_groups='^(root|adm)$'
+      target_user='root'
+      target_group='root'
+
+      # Preserve ownership for logs belonging to a system account
+      # below UID_MIN, matching the CIS remediation logic.
+      if [ "$uid" -lt "{{ uid_min }}" ]; then
+
+        owner_home="$(awk -F: -v u="$uid" '$3 == u {print $6}' /etc/passwd | head -1)"
+
+        if [ -n "$owner_home" ]; then
+          allowed_users="^(root|syslog|${user})$"
+        fi
+
+        group_members="$(awk -F: -v g="$gid" '$1 == g {print $4}' /etc/group)"
+
+        if [ -n "$group_members" ]; then
+          :
+        else
+          allowed_groups="^(root|adm|${group})$"
+        fi
+      fi
+      ;;
+    ```
+
+    esac
+
+    # Remove excessive permissions.
+
+    chmod "$rperms" "$file"
+
+    # Correct owner if required.
+
+    if [[ ! "$user" =~ $allowed_users ]]; then
+    chown "$target_user" "$file"
+    fi
+
+    # Correct group if required.
+
+    if [[ ! "$group" =~ $allowed_groups ]]; then
+    chgrp "$target_group" "$file"
+    fi
+
+    args:
+    executable: /bin/bash
+    loop: "{{ log_files.stdout_lines }}"
+    when:
+
+    * log_files.stdout_lines | length > 0
+
+  * name: Verify /var/log file permissions and ownership
+    ansible.builtin.shell: |
+    set -u
+
+    uid_min="$(awk '/^[[:space:]]*UID_MIN[[:space:]]/ {print $2}' /etc/login.defs)"
+
+    failed=0
+
+    while IFS= read -r -d '' file; do
+
+    ```
+    bname="$(basename "$file")"
+
+    mode="$(stat -Lc '%#a' "$file")"
+    user="$(stat -Lc '%U' "$file")"
+    group="$(stat -Lc '%G' "$file")"
+
+    case "$bname" in
+
+      lastlog|lastlog.*|wtmp|wtmp.*|wtmp-*|btmp|btmp.*|btmp-*|README)
+        perm_mask='0113'
+        allowed_users='^(root)$'
+        allowed_groups='^(root|utmp)$'
+        ;;
+
+      secure|auth.log|syslog|messages)
+        perm_mask='0137'
+        allowed_users='^(root|syslog)$'
+        allowed_groups='^(root|adm)$'
+        ;;
+
+      SSSD|sssd)
+        perm_mask='0117'
+        allowed_users='^(root|SSSD)$'
+        allowed_groups='^(root|SSSD)$'
+        ;;
+
+      gdm|gdm3)
+        perm_mask='0117'
+        allowed_users='^(root)$'
+        allowed_groups='^(root|gdm|gdm3)$'
+        ;;
+
+      *.journal|*.journal~)
+        perm_mask='0137'
+        allowed_users='^(root)$'
+        allowed_groups='^(root|systemd-journal)$'
+        ;;
+
+      *)
+        perm_mask='0137'
+        allowed_users='^(root|syslog)$'
+        allowed_groups='^(root|adm)$'
+        ;;
+
+    esac
+
+    if [ $((8#$mode & $perm_mask)) -ne 0 ]; then
+      echo "FAIL: $file mode=$mode"
+      failed=1
+    fi
+
+    if [[ ! "$user" =~ $allowed_users ]]; then
+      echo "FAIL: $file owner=$user"
+      failed=1
+    fi
+
+    if [[ ! "$group" =~ $allowed_groups ]]; then
+      echo "FAIL: $file group=$group"
+      failed=1
+    fi
+    ```
+
+    done < <(
+    find -L /var/log -type f -print0
+    )
+
+    if [ "$failed" -eq 0 ]; then
+    echo "PASS: All /var/log files have appropriate permissions and ownership"
+    exit 0
+    fi
+
+    exit 1
+    args:
+    executable: /bin/bash
+    register: log_verify
+    changed_when: false
+
+  * name: Display verification result
+    ansible.builtin.debug:
+    var: log_verify.stdout_lines
+
+  * name: Assert CIS 6.2.4.1 compliance
+    ansible.builtin.assert:
+    that:
+    - log_verify.rc == 0
+    success_msg: "CIS 6.2.4.1 compliant - all logfiles have appropriate permissions and ownership"
+    fail_msg: "CIS 6.2.4.1 failed - one or more logfiles still have incorrect permissions or ownership"
